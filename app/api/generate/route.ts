@@ -12,6 +12,8 @@ async function streamToBlob(stream: ReadableStream): Promise<Blob> {
   return blob;
 }
 
+export const maxDuration = 300; // Set maximum duration to 300 seconds (5 minutes)
+
 export async function POST(req: Request) {
   try {
     const { prompt } = await req.json();
@@ -45,136 +47,124 @@ export async function POST(req: Request) {
       }, { status: 500 });
     }
 
-    console.log("Prompt record created:", promptRecord);
-
-    console.log("Generating image with Replicate...");
-    // Generate image using Replicate
-    const output = await replicate.run(
-      "sidart10/sid-flex-2:3e83c91dacc629a25abe472a7d0ee13cbaef2ed05128321d516c0dd473e3d452",
-      {
-        input: {
-          prompt,
-          model: "dev",
-          go_fast: false,
-          lora_scale: 0.8,
-          megapixels: "1",
-          num_outputs: 4,
-          aspect_ratio: "16:9",
-          output_format: "png",
-          guidance_scale: 4.7,
-          output_quality: 80,
-          prompt_strength: 0.8,
-          extra_lora_scale: 1,
-          num_inference_steps: 28,
-        },
-      }
-    );
-
-    console.log("Replicate output:", output);
-
-    if (!output || !Array.isArray(output)) {
-      throw new Error("Failed to generate image");
-    }
-
-    const results = [];
-    // Process each stream from Replicate
-    for (const stream of output) {
-      if (stream instanceof ReadableStream) {
-        console.log("Processing stream...");
-        try {
-          const imageBlob = await streamToBlob(stream);
-          
-          const fileName = `${promptRecord.id}/${Date.now()}.png`;
-          console.log("Uploading to Supabase storage:", fileName);
-          
-          const { error: uploadError } = await supabase.storage
-            .from("thumbnails")
-            .upload(fileName, imageBlob);
-
-          if (uploadError) {
-            console.error("Error uploading to storage:", uploadError);
-            continue;
+    // Start the image generation process in the background
+    (async () => {
+      try {
+        console.log("Generating image with Replicate...");
+        const output = await replicate.run(
+          "sidart10/sid-flex-2:3e83c91dacc629a25abe472a7d0ee13cbaef2ed05128321d516c0dd473e3d452",
+          {
+            input: {
+              prompt,
+              model: "dev",
+              go_fast: false,
+              lora_scale: 0.8,
+              megapixels: "1",
+              num_outputs: 4,
+              aspect_ratio: "16:9",
+              output_format: "png",
+              guidance_scale: 4.7,
+              output_quality: 80,
+              prompt_strength: 0.8,
+              extra_lora_scale: 1,
+              num_inference_steps: 28,
+            },
           }
+        );
 
-          console.log("Getting public URL for uploaded file");
-          const { data: publicUrl } = supabase.storage
-            .from("thumbnails")
-            .getPublicUrl(fileName);
-
-          console.log("Public URL:", publicUrl);
-
-          // Save image record
-          console.log("Saving image record to database");
-          const { data: imageRecord, error: imageError } = await supabase
-            .from("images")
-            .insert([
-              {
-                prompt_id: promptRecord.id,
-                image_url: publicUrl.publicUrl,
-                storage_path: fileName,
-              },
-            ])
-            .select()
-            .single();
-
-          if (imageError) {
-            console.error("Error saving image record:", imageError);
-            continue;
-          }
-
-          results.push({
-            id: imageRecord.id,
-            url: publicUrl.publicUrl,
-            prompt: prompt,
-            liked: false
-          });
-        } catch (streamError) {
-          console.error("Error processing stream:", streamError);
-          continue;
+        if (!output || !Array.isArray(output)) {
+          throw new Error("Failed to generate image");
         }
-      } else {
-        console.warn("Received non-stream output from Replicate:", typeof stream);
+
+        const results = [];
+        // Process each stream from Replicate
+        for (const stream of output) {
+          if (stream instanceof ReadableStream) {
+            console.log("Processing stream...");
+            try {
+              const imageBlob = await streamToBlob(stream);
+              
+              const fileName = `${promptRecord.id}/${Date.now()}.png`;
+              console.log("Uploading to Supabase storage:", fileName);
+              
+              const { error: uploadError } = await supabase.storage
+                .from("thumbnails")
+                .upload(fileName, imageBlob);
+
+              if (uploadError) {
+                console.error("Error uploading to storage:", uploadError);
+                continue;
+              }
+
+              const { data: publicUrl } = supabase.storage
+                .from("thumbnails")
+                .getPublicUrl(fileName);
+
+              // Save image record
+              const { data: imageRecord, error: imageError } = await supabase
+                .from("images")
+                .insert([
+                  {
+                    prompt_id: promptRecord.id,
+                    image_url: publicUrl.publicUrl,
+                    storage_path: fileName,
+                  },
+                ])
+                .select()
+                .single();
+
+              if (imageError) {
+                console.error("Error saving image record:", imageError);
+                continue;
+              }
+
+              results.push({
+                id: imageRecord.id,
+                url: publicUrl.publicUrl,
+                prompt: prompt,
+                liked: false
+              });
+            } catch (streamError) {
+              console.error("Error processing stream:", streamError);
+              continue;
+            }
+          }
+        }
+
+        // Update prompt status based on results
+        const status = results.length > 0 ? "completed" : "failed";
+        await supabase
+          .from("prompts")
+          .update({ 
+            replicate_status: status,
+            completed_at: new Date().toISOString()
+          })
+          .eq("id", promptRecord.id);
+
+      } catch (error) {
+        console.error("Background task error:", error);
+        await supabase
+          .from("prompts")
+          .update({ 
+            replicate_status: "failed",
+            error_message: error instanceof Error ? error.message : "Unknown error"
+          })
+          .eq("id", promptRecord.id);
       }
-    }
+    })().catch(console.error);
 
-    // If no images were successfully processed, return an error
-    if (results.length === 0) {
-      await supabase
-        .from("prompts")
-        .update({ replicate_status: "failed" })
-        .eq("id", promptRecord.id);
-        
-      return NextResponse.json({
-        error: "Failed to process any images",
-        details: "All image processing attempts failed"
-      }, { status: 500 });
-    }
-
-    // Update prompt status to completed
-    console.log("Updating prompt status to completed");
-    const { error: updateError } = await supabase
-      .from("prompts")
-      .update({ replicate_status: "completed" })
-      .eq("id", promptRecord.id);
-
-    if (updateError) {
-      console.error("Error updating prompt status:", updateError);
-      return NextResponse.json({
-        error: "Database error",
-        details: updateError.message,
-      }, { status: 500 });
-    }
-
+    // Immediately return the prompt ID to the client
     return NextResponse.json({ 
       success: true, 
-      images: results,
-      message: "Thumbnail generated successfully"
+      message: "Image generation started",
+      promptId: promptRecord.id
     });
+
   } catch (error) {
-    console.error("Error generating thumbnail:", error);
+    console.error("Error in generate endpoint:", error);
     return NextResponse.json(
       { 
-        error: "Failed to generate thumbnail", 
+        error: "Failed to start generation", 
         details: error instanceof Error ? error.message : "Unknown error"
       },
       { status: 500 }
