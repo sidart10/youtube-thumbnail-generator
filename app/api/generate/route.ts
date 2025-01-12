@@ -77,63 +77,77 @@ export async function POST(req: Request) {
     }
 
     const results = [];
-    // Upload image to Supabase Storage and save record
+    // Process each stream from Replicate
     for (const stream of output) {
       if (stream instanceof ReadableStream) {
-        console.log("Converting stream to blob...");
-        const imageBlob = await streamToBlob(stream);
-        
-        const fileName = `${promptRecord.id}/${Date.now()}.png`;
-        console.log("Uploading to Supabase storage:", fileName);
-        
-        const { error: uploadError } = await supabase.storage
-          .from("thumbnails")
-          .upload(fileName, imageBlob);
+        console.log("Processing stream...");
+        try {
+          const imageBlob = await streamToBlob(stream);
+          
+          const fileName = `${promptRecord.id}/${Date.now()}.png`;
+          console.log("Uploading to Supabase storage:", fileName);
+          
+          const { error: uploadError } = await supabase.storage
+            .from("thumbnails")
+            .upload(fileName, imageBlob);
 
-        if (uploadError) {
-          console.error("Error uploading to storage:", uploadError);
-          return NextResponse.json({
-            error: "Storage error",
-            details: uploadError.message,
-          }, { status: 500 });
+          if (uploadError) {
+            console.error("Error uploading to storage:", uploadError);
+            continue;
+          }
+
+          console.log("Getting public URL for uploaded file");
+          const { data: publicUrl } = supabase.storage
+            .from("thumbnails")
+            .getPublicUrl(fileName);
+
+          console.log("Public URL:", publicUrl);
+
+          // Save image record
+          console.log("Saving image record to database");
+          const { data: imageRecord, error: imageError } = await supabase
+            .from("images")
+            .insert([
+              {
+                prompt_id: promptRecord.id,
+                image_url: publicUrl.publicUrl,
+                storage_path: fileName,
+              },
+            ])
+            .select()
+            .single();
+
+          if (imageError) {
+            console.error("Error saving image record:", imageError);
+            continue;
+          }
+
+          results.push({
+            id: imageRecord.id,
+            url: publicUrl.publicUrl,
+            prompt: prompt,
+            liked: false
+          });
+        } catch (streamError) {
+          console.error("Error processing stream:", streamError);
+          continue;
         }
-
-        console.log("Getting public URL for uploaded file");
-        const { data: publicUrl } = supabase.storage
-          .from("thumbnails")
-          .getPublicUrl(fileName);
-
-        console.log("Public URL:", publicUrl);
-
-        // Save image record
-        console.log("Saving image record to database");
-        const { data: imageRecord, error: imageError } = await supabase
-          .from("images")
-          .insert([
-            {
-              prompt_id: promptRecord.id,
-              image_url: publicUrl.publicUrl,
-              storage_path: fileName,
-            },
-          ])
-          .select()
-          .single();
-
-        if (imageError) {
-          console.error("Error saving image record:", imageError);
-          return NextResponse.json({
-            error: "Database error",
-            details: imageError.message,
-          }, { status: 500 });
-        }
-
-        results.push({
-          id: imageRecord.id,
-          url: publicUrl.publicUrl,
-          prompt: prompt,
-          liked: false
-        });
+      } else {
+        console.warn("Received non-stream output from Replicate:", typeof stream);
       }
+    }
+
+    // If no images were successfully processed, return an error
+    if (results.length === 0) {
+      await supabase
+        .from("prompts")
+        .update({ replicate_status: "failed" })
+        .eq("id", promptRecord.id);
+        
+      return NextResponse.json({
+        error: "Failed to process any images",
+        details: "All image processing attempts failed"
+      }, { status: 500 });
     }
 
     // Update prompt status to completed
