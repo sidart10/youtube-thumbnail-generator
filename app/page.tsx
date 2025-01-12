@@ -1,17 +1,38 @@
 "use client";
 
-import { useState } from "react";
-import { ThumbnailForm } from "@/components/ui/thumbnail-form";
-import { ThumbnailGrid } from "@/components/ui/thumbnail-grid";
+import { useState, useEffect } from "react";
+import { ThumbnailForm } from "@/app/components/ui/thumbnail-form";
+import { ThumbnailGrid } from "@/app/components/ui/thumbnail-grid";
 import { Toaster } from "react-hot-toast";
 
+type Image = {
+  id: string;
+  url: string;
+  prompt: string;
+  liked: boolean;
+};
+
 export default function Home() {
-  const [images, setImages] = useState<Array<{
-    id: string;
-    url: string;
-    prompt: string;
-    liked: boolean;
-  }>>([]);
+  const [images, setImages] = useState<Image[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchImages();
+  }, []);
+
+  const fetchImages = async () => {
+    try {
+      const response = await fetch("/api/images");
+      const data = await response.json();
+      if (data.images) {
+        setImages(data.images);
+      }
+    } catch (error) {
+      console.error("Error fetching images:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleDownload = async (url: string) => {
     try {
@@ -38,13 +59,21 @@ export default function Home() {
     );
   };
 
+  const handleNewImages = (newImages: Image[]) => {
+    setImages(prev => [...newImages, ...prev]);
+  };
+
   return (
     <main className="flex min-h-screen flex-col items-center p-8 gap-8">
       <h1 className="text-4xl font-bold text-center">
         YouTube Thumbnail Generator
       </h1>
-      <ThumbnailForm setImages={setImages} />
-      {images.length === 0 ? (
+      <ThumbnailForm setImages={handleNewImages} />
+      {loading ? (
+        <div className="text-center text-gray-500 mt-8">
+          Loading thumbnails...
+        </div>
+      ) : images.length === 0 ? (
         <div className="text-center text-gray-500 mt-8">
           No thumbnails generated yet. Enter a prompt above to get started!
         </div>
