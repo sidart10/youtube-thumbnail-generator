@@ -1,73 +1,87 @@
 import { useState } from "react";
-import { Button } from "@/app/components/ui/button";
-import { Input } from "@/app/components/ui/input";
-import toast from "react-hot-toast";
-
-type Image = {
-  id: string;
-  url: string;
-  prompt: string;
-  liked: boolean;
-};
+import { Button } from "./button";
+import { Input } from "./input";
 
 interface ThumbnailFormProps {
-  setImages: (images: Image[]) => void;
+  onImagesGenerated: (images: any[]) => void;
 }
 
-export function ThumbnailForm({ setImages }: ThumbnailFormProps) {
+export function ThumbnailForm({ onImagesGenerated }: ThumbnailFormProps) {
   const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const checkStatus = async (promptId: string) => {
+    try {
+      const response = await fetch(`/api/generate/status?promptId=${promptId}`);
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.status === "completed" && data.images) {
+        setIsLoading(false);
+        onImagesGenerated(data.images);
+      } else if (data.status === "failed") {
+        setIsLoading(false);
+        setError(data.error || "Failed to generate images");
+      } else {
+        // Keep polling if still processing
+        setTimeout(() => checkStatus(promptId), 2000);
+      }
+    } catch (error) {
+      setIsLoading(false);
+      setError(error instanceof Error ? error.message : "Failed to check status");
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!prompt.trim()) {
-      toast.error("Please enter a prompt");
-      return;
-    }
+    setIsLoading(true);
+    setError(null);
 
-    setLoading(true);
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ prompt: prompt.trim() }),
+        body: JSON.stringify({ prompt }),
       });
 
       const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to generate thumbnail");
+      if (data.error) {
+        throw new Error(data.error);
       }
 
-      if (data.images) {
-        setImages(data.images);
-        toast.success("Thumbnail generated successfully!");
-        setPrompt("");
+      if (data.promptId) {
+        // Start polling for status
+        checkStatus(data.promptId);
+      } else {
+        throw new Error("No prompt ID received");
       }
     } catch (error) {
-      console.error("Error generating thumbnail:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to generate thumbnail");
-    } finally {
-      setLoading(false);
+      setIsLoading(false);
+      setError(error instanceof Error ? error.message : "Failed to generate thumbnail");
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="w-full max-w-xl space-y-4">
-      <div className="flex gap-2">
+    <form onSubmit={handleSubmit} className="w-full max-w-3xl space-y-4">
+      <div className="flex flex-col space-y-2">
         <Input
-          type="text"
-          placeholder="Enter a prompt for your thumbnail..."
+          placeholder="Describe your YouTube thumbnail..."
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          disabled={loading}
+          disabled={isLoading}
         />
-        <Button type="submit" disabled={loading}>
-          {loading ? "Generating..." : "Generate"}
-        </Button>
       </div>
+      {error && <p className="text-red-500 text-sm">{error}</p>}
+      <Button type="submit" disabled={isLoading || !prompt.trim()}>
+        {isLoading ? "Generating..." : "Generate Thumbnail"}
+      </Button>
     </form>
   );
 } 

@@ -27,8 +27,7 @@ export async function POST(req: Request) {
       );
     }
 
-    console.log("Creating prompt record...");
-    // Create a prompt record
+    // Create prompt record
     const { data: promptRecord, error: promptError } = await supabase
       .from("prompts")
       .insert([
@@ -51,45 +50,45 @@ export async function POST(req: Request) {
     // Start the image generation process in the background
     (async () => {
       try {
-        console.log("Creating prediction with Replicate...");
-        const prediction = await replicate.predictions.create({
-          version: "3e83c91dacc629a25abe472a7d0ee13cbaef2ed05128321d516c0dd473e3d452",
-          input: {
-            prompt,
-            model: "dev",
-            go_fast: true, // Enable fast mode
-            lora_scale: 0.8,
-            megapixels: "1",
-            num_outputs: 2, // Reduce number of outputs for faster processing
-            aspect_ratio: "16:9",
-            output_format: "png",
-            guidance_scale: 4.7,
-            output_quality: 80,
-            prompt_strength: 0.8,
-            extra_lora_scale: 1,
-            num_inference_steps: 20, // Reduce steps for faster processing
-          },
-        });
-
         // Update status to processing
         await supabase
           .from("prompts")
           .update({ replicate_status: "processing" })
           .eq("id", promptRecord.id);
 
+        console.log("Creating prediction with Replicate...");
+        const prediction = await replicate.predictions.create({
+          version: "3e83c91dacc629a25abe472a7d0ee13cbaef2ed05128321d516c0dd473e3d452",
+          input: {
+            prompt,
+            model: "dev",
+            go_fast: true,
+            lora_scale: 0.8,
+            megapixels: "1",
+            num_outputs: 2,
+            aspect_ratio: "16:9",
+            output_format: "png",
+            guidance_scale: 4.7,
+            output_quality: 80,
+            prompt_strength: 0.8,
+            extra_lora_scale: 1,
+            num_inference_steps: 20,
+          },
+        });
+
         console.log("Waiting for prediction...");
         const output = await replicate.wait(prediction);
         console.log("Prediction completed:", output);
 
-        if (!output || !output.output || !Array.isArray(output.output)) {
-          throw new Error("Invalid output from Replicate");
+        if (!output?.output || !Array.isArray(output.output) || output.output.length === 0) {
+          throw new Error("No images generated");
         }
 
         const results = [];
         // Process each image URL from Replicate
         for (const imageUrl of output.output) {
           if (typeof imageUrl !== 'string') {
-            console.warn("Skipping invalid image URL:", imageUrl);
+            console.warn("Invalid image URL:", imageUrl);
             continue;
           }
 
@@ -112,6 +111,11 @@ export async function POST(req: Request) {
             const { data: publicUrl } = supabase.storage
               .from("thumbnails")
               .getPublicUrl(fileName);
+
+            if (!publicUrl?.publicUrl) {
+              console.error("Failed to get public URL");
+              continue;
+            }
 
             // Save image record
             const { data: imageRecord, error: imageError } = await supabase
@@ -145,11 +149,14 @@ export async function POST(req: Request) {
 
         // Update prompt status based on results
         const status = results.length > 0 ? "completed" : "failed";
+        const error_message = results.length === 0 ? "Failed to process any images" : null;
+        
         await supabase
           .from("prompts")
           .update({ 
             replicate_status: status,
-            completed_at: new Date().toISOString()
+            completed_at: new Date().toISOString(),
+            error_message
           })
           .eq("id", promptRecord.id);
 
@@ -159,11 +166,14 @@ export async function POST(req: Request) {
           .from("prompts")
           .update({ 
             replicate_status: "failed",
-            error_message: error instanceof Error ? error.message : "Unknown error"
+            error_message: error instanceof Error ? error.message : "Unknown error",
+            completed_at: new Date().toISOString()
           })
           .eq("id", promptRecord.id);
       }
-    })().catch(console.error);
+    })().catch(error => {
+      console.error("Unhandled background task error:", error);
+    });
 
     // Immediately return the prompt ID to the client
     return NextResponse.json({ 

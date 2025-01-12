@@ -33,8 +33,8 @@ export async function GET(req: Request) {
       }, { status: 404 });
     }
 
-    // If the prompt is completed, fetch the generated images
-    if (prompt.replicate_status === "completed") {
+    // If the prompt is completed or failed, fetch the generated images
+    if (prompt.replicate_status === "completed" || prompt.replicate_status === "failed") {
       const { data: images, error: imagesError } = await supabase
         .from("images")
         .select("*")
@@ -47,23 +47,29 @@ export async function GET(req: Request) {
         }, { status: 500 });
       }
 
-      const formattedImages = images.map(image => ({
+      const formattedImages = images?.map(image => ({
         id: image.id,
         url: image.image_url,
         prompt: prompt.prompt_text,
         liked: false
-      }));
+      })) || [];
 
       return NextResponse.json({
         status: prompt.replicate_status,
-        images: formattedImages
+        error: prompt.error_message,
+        images: formattedImages,
+        createdAt: prompt.created_at,
+        completedAt: prompt.completed_at
       });
     }
 
-    // Return just the status for non-completed prompts
+    // Return status for pending or processing prompts
     return NextResponse.json({
       status: prompt.replicate_status,
-      error: prompt.error_message
+      message: prompt.replicate_status === "pending" 
+        ? "Waiting to start generation" 
+        : "Generating images...",
+      createdAt: prompt.created_at
     });
 
   } catch (error) {
