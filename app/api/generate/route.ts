@@ -12,7 +12,8 @@ async function downloadImage(url: string): Promise<Blob> {
   return await response.blob();
 }
 
-export const maxDuration = 300; // Set maximum duration to 300 seconds (5 minutes)
+export const runtime = 'edge'; // Use edge runtime for better performance
+export const maxDuration = 60; // Set to maximum allowed for Hobby plan (60 seconds)
 
 export async function POST(req: Request) {
   try {
@@ -56,19 +57,25 @@ export async function POST(req: Request) {
           input: {
             prompt,
             model: "dev",
-            go_fast: false,
+            go_fast: true, // Enable fast mode
             lora_scale: 0.8,
             megapixels: "1",
-            num_outputs: 4,
+            num_outputs: 2, // Reduce number of outputs for faster processing
             aspect_ratio: "16:9",
             output_format: "png",
             guidance_scale: 4.7,
             output_quality: 80,
             prompt_strength: 0.8,
             extra_lora_scale: 1,
-            num_inference_steps: 28,
+            num_inference_steps: 20, // Reduce steps for faster processing
           },
         });
+
+        // Update status to processing
+        await supabase
+          .from("prompts")
+          .update({ replicate_status: "processing" })
+          .eq("id", promptRecord.id);
 
         console.log("Waiting for prediction...");
         const output = await replicate.wait(prediction);
